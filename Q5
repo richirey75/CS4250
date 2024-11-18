@@ -1,0 +1,94 @@
+import urllib.request
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
+import pymongo
+
+# MongoDB setup
+client = pymongo.MongoClient("mongodb://localhost:27017/")
+db = client["crawler"]
+collection = db["pages"]
+
+# Frontier to manage URLs to visit
+class Frontier:
+    def __init__(self, start_url):
+        self.to_visit = [start_url]
+        self.visited = set()
+    
+    def done(self):
+        return not self.to_visit
+    
+    def nextURL(self):
+        return self.to_visit.pop(0)
+    
+    def addURL(self, url):
+        if url not in self.visited and url not in self.to_visit:
+            self.to_visit.append(url)
+    
+    def markVisited(self, url):
+        self.visited.add(url)
+
+# Retrieve HTML from a URL
+def retrieveHTML(url):
+    try:
+        with urllib.request.urlopen(url) as response:
+            if response.headers.get_content_type() in ['text/html']:
+                return response.read()
+    except Exception as e:
+        print(f"Error retrieving URL {url}: {e}")
+    return None
+
+# Store page HTML data in MongoDB
+def storePage(url, html):
+    if html:
+        collection.insert_one({"url": url, "html": html.decode("utf-8")})
+
+# Parse the HTML and check if the target page is found
+def parse(html):
+    soup = BeautifulSoup(html, "html.parser")
+    # Look for the target heading
+    if soup.find("h1", {"class": "cpp-h1"}, string="Permanent Faculty"):
+        return True, soup
+    return False, soup
+
+# Extract all valid links from a page
+def extractLinks(soup, base_url):
+    links = set()
+    for tag in soup.find_all("a", href=True):
+        link = tag['href']
+        # Resolve relative URLs
+        absolute_link = urljoin(base_url, link)
+        if absolute_link.endswith(('.html', '.shtml')):  # Only HTML/SHTML pages
+            links.add(absolute_link)
+    return links
+
+# Flag when the target page is found
+def flagTargetPage(url):
+    print(f"Target page found at: {url}")
+
+# Clear the frontier to stop crawling
+def clear_frontier(frontier):
+    frontier.to_visit.clear()
+
+# Main crawler procedure
+def crawlerThread(frontier):
+    while not frontier.done():
+        url = frontier.nextURL()
+        print(f"Visiting: {url}")
+        frontier.markVisited(url)
+        html = retrieveHTML(url)
+        if html:
+            storePage(url, html)
+            is_target, soup = parse(html)
+            if is_target:
+                flagTargetPage(url)
+                clear_frontier(frontier)
+                break
+            else:
+                for link in extractLinks(soup, url):
+                    frontier.addURL(link)
+
+# Entry point
+if __name__ == "__main__":
+    start_url = "https://www.cpp.edu/sci/computer-science/"
+    frontier = Frontier(start_url)
+    crawlerThread(frontier)
